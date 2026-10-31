@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto Prompt</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="" width="30" height="30">
+      <div>
+        <h1>Auto Prompt</h1>
+        <p>for ChatGPT &amp; Gemini</p>
+      </div>
+    </div>
+    <span class="pill" id="pill"><i></i><span id="pillText">Idle</span></span>
+  </header>
+
+  <section class="stats">
+    <div class="tile"><b id="sSent">0</b><span>Sent</span></div>
+    <div class="tile"><b id="sChat">0</b><span>This chat</span></div>
+    <div class="tile"><b id="sChats">0</b><span>Chats</span></div>
+    <div class="tile"><b id="sTime">0:00</b><span>Elapsed</span></div>
+  </section>
+
+  <section class="controls">
+    <button id="start" class="btn primary">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M7 4.5v15l13-7.5z" fill="currentColor"/></svg>Start
+    </button>
+    <button id="pause" class="btn" disabled>
+      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/></svg><span id="pauseText">Pause</span>
+    </button>
+    <button id="stop" class="btn danger" disabled>
+      <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>Stop
+    </button>
+  </section>
+
+  <div class="statusline" id="statusline">Ready</div>
+  <div class="notice" id="notice" hidden></div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="prompts" role="tab">Prompts</button>
+    <button class="tab" data-tab="timing" role="tab">Timing</button>
+    <button class="tab" data-tab="smart" role="tab">Automation</button>
+    <button class="tab" data-tab="log" role="tab">Log</button>
+  </nav>
+
+  <main>
+    <!-- PROMPTS -->
+    <section class="panel active" id="tab-prompts">
+      <label class="field">
+        <span class="lbl">Prompt source</span>
+        <select id="mode">
+          <option value="generate">Auto-generate (random topics)</option>
+          <option value="list">My list — in order, then loop</option>
+          <option value="shuffle">My list — random order</option>
+          <option value="single">Single prompt — repeat</option>
+        </select>
+      </label>
+
+      <div class="field" id="catBox">
+        <span class="lbl">Categories</span>
+        <div class="chips" id="cats"></div>
+        <div class="example"><span id="example"></span><button id="reroll" class="link" title="New example">↻ New example</button></div>
+      </div>
+
+      <label class="field" id="textBox" hidden>
+        <span class="lbl"><span id="textLbl">Prompts (one per line)</span><em id="lineCount"></em></span>
+        <textarea id="prompts" spellcheck="false" placeholder="Write one prompt per line…"></textarea>
+      </label>
+
+      <label class="field">
+        <span class="lbl">Add to every prompt <em>optional</em></span>
+        <input id="suffix" type="text" placeholder="e.g. Answer in simple English.">
+      </label>
+    </section>
+
+    <!-- TIMING -->
+    <section class="panel" id="tab-timing">
+      <div class="field">
+        <span class="lbl">Wait after each reply (seconds)</span>
+        <div class="pair">
+          <label><small>Min</small><input id="delayMin" type="number" min="2" step="1"></label>
+          <label><small>Max</small><input id="delayMax" type="number" min="2" step="1"></label>
+        </div>
+        <p class="hint">A random time between min and max is used each round.</p>
+      </div>
+      <div class="field">
+        <span class="lbl">Stop automatically</span>
+        <div class="pair">
+          <label><small>After prompts <i>(0 = never)</i></small><input id="maxPrompts" type="number" min="0" step="1"></label>
+          <label><small>After minutes <i>(0 = never)</i></small><input id="maxMinutes" type="number" min="0" step="1"></label>
+        </div>
+      </div>
+    </section>
+
+    <!-- AUTOMATION -->
+    <section class="panel" id="tab-smart">
+      <div class="field">
+        <span class="lbl">New chat every N prompts <em>0 = off</em></span>
+        <input id="newChatEvery" type="number" min="0" step="1">
+        <p class="hint">A new chat is also opened automatically when the current one is full.</p>
+      </div>
+
+      <label class="switch"><input id="onLimitNewChat" type="checkbox"><span class="track"></span>
+        <span class="txt"><b>New chat on limit</b><small>Open a fresh chat when a usage limit is hit</small></span></label>
+      <label class="switch"><input id="switchModel" type="checkbox"><span class="track"></span>
+        <span class="txt"><b>Switch model on limit</b><small>Try another available model first</small></span></label>
+      <label class="switch"><input id="autoRetry" type="checkbox"><span class="track"></span>
+        <span class="txt"><b>Auto-retry errors</b><small>Retry "Something went wrong" replies</small></span></label>
+      <label class="switch"><input id="showPanel" type="checkbox"><span class="track"></span>
+        <span class="txt"><b>On-page control panel</b><small>Floating Pause / Stop panel on the page</small></span></label>
+
+      <div class="field">
+        <span class="lbl">If every model is limited, retry after (minutes)</span>
+        <input id="limitWaitMin" type="number" min="1" step="1">
+      </div>
+    </section>
+
+    <!-- LOG -->
+    <section class="panel" id="tab-log">
+      <div class="logbar">
+        <span class="hint">Latest activity</span>
+        <span><button id="copyLog" class="link">Copy</button> · <button id="clearLog" class="link">Clear</button></span>
+      </div>
+      <ul class="log" id="logList"><li class="empty">Nothing yet.</li></ul>
+    </section>
+  </main>
+
+  <footer>Alt+Shift+P pause / resume &nbsp;·&nbsp; Alt+Shift+X stop &nbsp;·&nbsp; v4.1</footer>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
