@@ -2,15 +2,19 @@
   if (window.__autoPromptLoaded) return;
   window.__autoPromptLoaded = true;
 
-  const { KEYS, DEFAULTS, generate } = globalThis.AP;
-  const GEMINI = /(^|\.)gemini\.google\.com$/.test(location.hostname);
+  const { KEYS, DEFAULTS, buildPrompt } = globalThis.AP;
+  const SITE = globalThis.AP.siteFor(location.hostname.replace(/^www\./, ""));
+  if (!SITE) return; // unknown host — content script should not run here
   const OWNER = "ap_owner"; // sessionStorage token: only the tab where START was pressed runs
+  const SID = "ap_sid";     // sessionStorage per-tab stats/log key suffix
 
   let loopId = 0;
   let loopActive = false;
   let ctl = { running: false, paused: false };
   let stats = {};
   let logBuf = [];
+  let myId = null;       // 8-char run token, also used as storage key suffix
+  let myKeys = null;     // { st, log, ctl }
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const rand = (a, b) => a + Math.random() * (b - a);
@@ -26,15 +30,18 @@
   const store = {
     async get(k, d) {
       try { const o = await chrome.storage.local.get(k); return o[k] === undefined ? d : o[k]; }
-      catch (_) { return d; }
+      catch (e) { console.warn("[AutoPrompt] storage.get failed:", e && e.message); return d; }
     },
-    async set(o) { try { await chrome.storage.local.set(o); } catch (_) {} }
+    async set(o) {
+      try { await chrome.storage.local.set(o); }
+      catch (e) { console.warn("[AutoPrompt] storage.set failed:", e && e.message); }
+    }
   };
   const getCfg = async () => ({ ...DEFAULTS, ...(await store.get(KEYS.cfg, {})) });
 
   async function patchStats(p) {
     stats = { ...stats, ...p };
-    await store.set({ [KEYS.st]: stats });
+    await store.set({ [myKeys.st]: stats });
     panelRender();
   }
   async function setStatus(text, phase) {
@@ -46,7 +53,7 @@
     logBuf.push({ t: Date.now(), m: msg, l: level || "info" });
     if (logBuf.length > 150) logBuf.shift();
     clearTimeout(logTimer);
-    logTimer = setTimeout(() => store.set({ [KEYS.log]: logBuf }), 250);
+    logTimer = setTimeout(() => store.set({ [myKeys.log]: logBuf }), 250);
   }
 
   /* ================= loop helpers ================= */
@@ -57,7 +64,7 @@
     while (Date.now() < end) {
       if (alive && !alive()) return null;
       let v = null;
-      try { v = fn(); } catch (_) {}
+      try { v = fn(); } catch (e) { log("selector error: " + (e && e.message), "warn"); }
       if (v) return v;
       await sleep(200);
     }
@@ -85,39 +92,26 @@
     return alive();
   }
 
-  /* ================= DOM: ChatGPT ================= */
+  /* ================= DOM (all selectors come from the SITE adapter) ================= */
   function getComposer() {
-    const sel = GEMINI
-      ? 'rich-textarea .ql-editor, div.ql-editor[contenteditable="true"], [contenteditable="true"][role="textbox"]'
-      : '#prompt-textarea, div.ProseMirror[contenteditable="true"], form textarea';
-    const c = [...document.querySelectorAll(sel)].filter(el => visible(el) && !el.closest("#__ap_host"));
-    return c.find(el => el.id === "prompt-textarea") || c[0] || null;
+    const c = [...document.querySelectorAll(SITE.composer)]
+      .filter(el => visible(el) && !el.closest("#__ap_host"));
+    return c.find(el => SITE.composerFirst && SITE.composerFirst(el)) || c[0] || null;
   }
   function sendBtnReady() {
-    const b = GEMINI
-      ? document.querySelector('button.send-button:not(.stop), button[aria-label="Send message"], button[aria-label^="Send"]')
-      : document.querySelector('button[data-testid="send-button"]') ||
-      document.querySelector('button[aria-label="Send prompt"]') ||
-      document.querySelector('button[aria-label^="Send"]');
+    const b = document.querySelector(SITE.sendBtn);
     return b && !b.disabled && b.getAttribute("aria-disabled") !== "true" && visible(b) ? b : null;
   }
   function isGenerating() {
-    if (GEMINI) {
-      return !!document.querySelector(
-        'button.send-button.stop, button.stop, button[aria-label="Stop response"], button[aria-label*="Stop"], model-response .pending'
-      );
-    }
-    if (document.querySelector('button[data-testid="stop-button"], .result-streaming')) return true;
+    if (document.querySelector(SITE.stopBtn)) return true;
     return [...document.querySelectorAll("button[aria-label]")].some(b =>
-      /^stop( streaming| generating| response)?$/i.test(b.getAttribute("aria-label").trim()) && visible(b)
+      SITE.stopLabel.test((b.getAttribute("aria-label") || "").trim()) && visible(b)
     );
   }
-  const Q_USER = GEMINI ? "user-query" : '[data-message-author-role="user"]';
-  const Q_ASST = GEMINI ? "model-response" : '[data-message-author-role="assistant"]';
-  const countUser = () => document.querySelectorAll(Q_USER).length;
-  const countAssistant = () => document.querySelectorAll(Q_ASST).length;
+  const countUser = () => document.querySelectorAll(SITE.user).length;
+  const countAssistant = () => document.querySelectorAll(SITE.assistant).length;
   const countTurns = () =>
-    GEMINI ? countUser() : document.querySelectorAll('[data-testid^="conversation-turn"]').length;
+    SITE.turns ? document.querySelectorAll(SITE.turns).length : countUser();
 
   /* ---- composer text ---- */
   const norm = s => (s || "").replace(/\s+/g, " ").trim();
@@ -135,9 +129,9 @@
     sel.addRange(r);
   }
   async function focusEl(el) {
-    try { el.focus({ preventScroll: true }); } catch (_) {}
+    try { el.focus({ preventScroll: true }); } catch (e) { log("focus failed: " + (e && e.message), "warn"); }
     if (document.activeElement !== el && !el.contains(document.activeElement)) {
-      try { el.click(); el.focus({ preventScroll: true }); } catch (_) {}
+      try { el.click(); el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
     }
     await sleep(60);
     return document.activeElement === el || el.contains(document.activeElement);
@@ -152,13 +146,13 @@
     if (composerEmpty(el)) return;
     if (await focusEl(el)) {
       selectAll(el);
-      try { document.execCommand("delete"); } catch (_) {}
+      try { document.execCommand("delete"); } catch (e) { log("clear failed: " + (e && e.message), "warn"); }
       await sleep(120);
     }
   }
 
   // Types `text` into the chat box. Only ever touches the composer itself.
-  async function setComposerText(el, text) {
+  async function setComposerText(el, text, cfg) {
     const want = norm(text);
     const probe = want.slice(0, 24);
     const good = () => {
@@ -184,11 +178,11 @@
           const dt = new DataTransfer();
           dt.setData("text/plain", text);
           el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
-        } catch (_) {}
+        } catch (e) { log("paste event failed: " + (e && e.message), "warn"); }
       } else if (method === "exec") {
         if (!focused) continue; // never run execCommand unless the composer really has focus
         selectAll(el);
-        try { document.execCommand("insertText", false, text); } catch (_) {}
+        try { document.execCommand("insertText", false, text); } catch (e) { /* ignore */ }
       } else {
         el.textContent = text;
         el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
@@ -200,6 +194,22 @@
     return false;
   }
 
+  // Human-like typing: character-by-character with random jitter (used when cfg.typingHuman)
+  async function typeHuman(el, text, cfg) {
+    await focusEl(el);
+    await clearComposer(el);
+    const lo = Math.max(1, +cfg.typingMsMin || 8);
+    const hi = Math.max(lo, +cfg.typingMsMax || 25);
+    for (const ch of text) {
+      el.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: ch }));
+      document.execCommand("insertText", false, ch);
+      await sleep(rand(lo, hi));
+      if (Math.random() < 0.02) await sleep(rand(150, 400)); // occasional pause
+    }
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    return true;
+  }
+
   function pressEnter(el) {
     el.focus();
     const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
@@ -208,7 +218,10 @@
     el.dispatchEvent(new KeyboardEvent("keyup", o));
   }
 
-  /* ================= limit / full / error detection ================= */
+  /* ================= limit / full / error detection =================
+     v5: scanning is scoped to dialogs, alerts, snackbars and <main>
+     (per-adapter blockScopes), so sidebar / message text can never
+     cause a false positive, and full-screen modals ARE covered. */
   const FULL_PATTERNS = [
     /maximum length for this conversation/,
     /conversation is too long/,
@@ -227,41 +240,39 @@
     /quota (exceeded|reached)/,
     /reached your (daily )?(limit|quota)/
   ];
-  // Looks only at UI outside the chat messages, the sidebar and the composer,
-  // so your prompts / ChatGPT's replies can never trigger a false positive.
+
   function detectBlock() {
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === 1) {
-            if (
-              node.id === "__ap_host" ||
-              node.matches('nav, aside, [data-message-author-role], user-query, model-response, side-nav-container, bard-sidenav, script, style, [contenteditable="true"], textarea')
-            ) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
+    const scopeSel = SITE.blockScopes;
+    let limit = false;
+    for (const scope of document.querySelectorAll(scopeSel)) {
+      if (scope.closest("#__ap_host")) continue;
+      const walker = document.createTreeWalker(
+        scope,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode(node) {
+            return node.nodeValue && node.nodeValue.trim().length > 12
+              ? NodeFilter.FILTER_ACCEPT
+              : NodeFilter.FILTER_REJECT;
           }
-          return node.nodeValue && node.nodeValue.trim().length > 12
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
         }
+      );
+      let n;
+      while ((n = walker.nextNode())) {
+        const p = n.parentElement;
+        const raw = (p && p.textContent.length < 300 ? p.textContent : n.nodeValue) || "";
+        const txt = raw.toLowerCase().replace(/[’‘]/g, "'");
+        if (FULL_PATTERNS.some(r => r.test(txt))) return "full";
+        if (!limit && LIMIT_PATTERNS.some(r => r.test(txt))) limit = true;
       }
-    );
-    let n, limit = false;
-    while ((n = walker.nextNode())) {
-      const p = n.parentElement;
-      const raw = (p && p.textContent.length < 300 ? p.textContent : n.nodeValue) || "";
-      const txt = raw.toLowerCase().replace(/[’‘]/g, "'");
-      if (FULL_PATTERNS.some(r => r.test(txt))) return "full";
-      if (!limit && LIMIT_PATTERNS.some(r => r.test(txt))) limit = true;
+      // dialogs/toasts may nest — stop early if a full-chat signal was inside this scope
     }
     return limit ? "limit" : null;
   }
 
   function replyError() {
     const alerts = [...document.querySelectorAll('[role="alert"]')].map(e => e.textContent).join(" ");
-    const msgs = document.querySelectorAll(Q_ASST);
+    const msgs = document.querySelectorAll(SITE.assistant);
     const last = msgs[msgs.length - 1];
     const lt = last && (last.textContent || "").length < 160 ? last.textContent : "";
     return /something went wrong|couldn't (generate|complete)|network error|error in message stream|an error occurred|failed to generate/i
@@ -274,17 +285,18 @@
     );
   }
 
-  /* ================= model switching (best effort) ================= */
+  /* ================= model switching (ChatGPT only, best effort) ================= */
   function modelButton() {
+    if (!SITE.modelSwitcher) return null;
     return (
-      document.querySelector('button[data-testid="model-switcher-dropdown-button"]') ||
+      document.querySelector(SITE.modelSwitcher.button) ||
       [...document.querySelectorAll("button")].find(b => /model/i.test(b.getAttribute("aria-label") || ""))
     );
   }
   const firstLine = el => (el.innerText || el.textContent || "").trim().split("\n")[0].trim().toLowerCase();
 
   async function trySwitchModel() {
-    if (GEMINI) return false; // Gemini has no safe model switcher to automate
+    if (!SITE.modelSwitcher) return false;
     const btn = modelButton();
     if (!btn) return false;
 
@@ -295,9 +307,7 @@
     btn.click();
     await sleep(900);
 
-    const items = [...document.querySelectorAll(
-      '[role="menuitem"], [role="menuitemradio"], [data-testid^="model-switcher-"]'
-    )].filter(el => el !== btn && visible(el));
+    const items = [...document.querySelectorAll(SITE.modelSwitcher.items)].filter(el => el !== btn && visible(el));
 
     const choice = items.find(el => {
       const label = firstLine(el);
@@ -324,23 +334,10 @@
   }
 
   /* ================= new chat ================= */
-  const isHome = () => GEMINI
-    ? /\/app\/?$/.test(location.pathname)
-    : location.pathname === "/" || location.pathname === "";
-  const homeUrl = () => GEMINI ? location.pathname.replace(/\/app.*$/, "/app") : "/";
+  const isHome = () => SITE.isHome(location.pathname);
+  const homeUrl = () => SITE.homeUrl(location.pathname);
   function findNewChatLink() {
-    if (GEMINI) {
-      return (
-        [...document.querySelectorAll(
-          '[data-test-id="new-chat-button"] a, a[data-test-id="new-chat-button"], [data-test-id="new-chat-button"], a[aria-label="New chat"], button[aria-label="New chat"], a[href$="/app"]'
-        )].find(visible) || null
-      );
-    }
-    return (
-      document.querySelector('a[data-testid="create-new-chat-button"]') ||
-      [...document.querySelectorAll('a[href="/"], button[aria-label="New chat"]')].find(visible) ||
-      null
-    );
+    return [...document.querySelectorAll(SITE.newChat)].find(visible) || null;
   }
   // Returns "same" (SPA navigation, loop continues here) or "reload" (page is reloading).
   async function newChat(reason, alive) {
@@ -408,36 +405,34 @@
     return newChat("retry after wait", alive);
   }
 
-  /* ================= prompts ================= */
-  function buildPrompt(cfg) {
-    const lines = (cfg.prompts || "").split("\n").map(x => x.trim()).filter(Boolean);
-    let text = "", idx = stats.idx || 0;
-
-    if (cfg.mode === "single" && cfg.prompts.trim()) {
-      text = cfg.prompts.trim();
-    } else if (cfg.mode === "list" && lines.length) {
-      text = lines[idx % lines.length];
-      idx++;
-    } else if (cfg.mode === "shuffle" && lines.length) {
-      for (let i = 0; i < 8; i++) {
-        text = lines[Math.floor(Math.random() * lines.length)];
-        if (lines.length < 2 || text !== stats.lastPrompt) break;
-      }
-    } else {
-      text = generate(cfg.categories, stats.lastPrompt);
-    }
-    if (cfg.suffix && cfg.suffix.trim()) text += " " + cfg.suffix.trim();
-    return { text, idx };
+  /* ================= reply capture ================= */
+  async function captureReply(promptText) {
+    if (!document.querySelector(SITE.assistant)) return;
+    const msgs = document.querySelectorAll(SITE.assistant);
+    const last = msgs[msgs.length - 1];
+    const text = ((last && last.innerText) || "").trim();
+    if (!text) return;
+    try {
+      const o = await chrome.storage.local.get(KEYS.replies);
+      const list = o[KEYS.replies] || [];
+      list.push({ t: Date.now(), site: SITE.id, prompt: promptText, reply: text.slice(0, 20000) });
+      while (list.length > 500) list.shift();
+      await chrome.storage.local.set({ [KEYS.replies]: list });
+      log(`Reply captured (${text.length} chars)`, "ok");
+    } catch (e) { log("capture failed: " + (e && e.message), "warn"); }
   }
 
   /* ================= sending ================= */
-  async function sendPrompt(text, alive) {
+  async function sendPrompt(text, alive, cfg) {
     const composer = await waitFor(getComposer, 15000, alive);
     if (!composer) return { ok: false, why: "chat box not found" };
 
     const bUser = countUser(), bTurns = countTurns(), bAsst = countAssistant();
 
-    if (!(await setComposerText(composer, text))) {
+    const typed = cfg && cfg.typingHuman
+      ? await typeHuman(composer, text, cfg)
+      : await setComposerText(composer, text, cfg);
+    if (!typed) {
       await clearComposer(composer);
       return { ok: false, why: "could not type into the chat box" };
     }
@@ -470,7 +465,7 @@
     }
     if (!ok) {
       await clearComposer(getComposer());
-      return { ok: false, why: "ChatGPT did not accept the message" };
+      return { ok: false, why: `${SITE.name} did not accept the message` };
     }
     return { ok: true, bAsst };
   }
@@ -488,12 +483,20 @@
   async function finish(text, phase) {
     loopActive = false;
     ctl = { ...ctl, running: false, paused: false };
-    await store.set({ [KEYS.ctl]: ctl });
+    await store.set({ [myKeys.ctl]: ctl, [KEYS.ctl]: ctl });
     await patchStats({ status: text, phase: phase || "done", endedAt: Date.now() });
     log(text, phase === "error" ? "err" : "ok");
     clearTimeout(logTimer);
-    await store.set({ [KEYS.log]: logBuf });
+    await store.set({ [myKeys.log]: logBuf });
     setTimeout(panelHide, phase === "error" ? 20000 : 10000);
+  }
+
+  /* ================= per-site delay resolution ================= */
+  function delaysFor(cfg) {
+    const o = (cfg.siteDelays || {})[SITE.id] || {};
+    const lo = Math.max(2, Number(o.delayMin != null ? o.delayMin : cfg.delayMin) || 5);
+    const hi = Math.max(lo, Number(o.delayMax != null ? o.delayMax : cfg.delayMax) || lo);
+    return { lo, hi };
   }
 
   /* ================= main loop ================= */
@@ -501,19 +504,19 @@
     const alive = aliveFor(id);
     loopActive = true;
 
-    ctl = await store.get(KEYS.ctl, { running: true });
-    stats = await store.get(KEYS.st, {});
-    logBuf = await store.get(KEYS.log, []);
+    ctl = await store.get(myKeys.ctl, { running: true });
+    stats = await store.get(myKeys.st, {});
+    logBuf = await store.get(myKeys.log, []);
     let cfg = await getCfg();
     if (!stats.startedAt) await patchStats({ startedAt: Date.now() });
     if (cfg.showPanel) panelShow(); else panelHide();
 
-    await setStatus("Waiting for ChatGPT page...", "wait");
+    await setStatus(`Waiting for ${SITE.name} page...`, "wait");
     if (!(await afterNewChat(cfg, alive))) {
       if (alive()) await finish("Chat box not found. Refresh the page and press Start again.", "error");
       return;
     }
-    log("Run started");
+    log(`Run started on ${SITE.name}`);
 
     let fails = 0;
     while (alive()) {
@@ -552,10 +555,14 @@
         if (!(await sleepA(1000, alive))) return;
       }
 
-      // ---- send ----
-      const { text, idx } = buildPrompt(cfg);
+      // ---- build & send ----
+      const { text, idx, chainDone } = buildPrompt(cfg, stats);
+      if (chainDone) {
+        await finish(`Chain complete - ${stats.sent} prompts sent`, "done");
+        return;
+      }
       await setStatus(`Sending prompt #${(stats.sent || 0) + 1}...`, "run");
-      const r = await sendPrompt(text, alive);
+      const r = await sendPrompt(text, alive, cfg);
       if (!alive()) return;
 
       if (r.ok) {
@@ -570,11 +577,13 @@
         await waitResponse(r.bAsst, alive);
         if (!alive()) return;
 
+        if (cfg.captureReplies) await captureReply(text);
+
         // reply failed ("Something went wrong")?
         if (cfg.autoRetry && replyError()) {
           const streak = (stats.errStreak || 0) + 1;
           await patchStats({ errStreak: streak, errors: (stats.errors || 0) + 1 });
-          log(`ChatGPT returned an error (${streak})`, "warn");
+          log(`${SITE.name} returned an error (${streak})`, "warn");
           const retry = findRetryButton();
           if (retry && streak < 3) {
             retry.click();
@@ -591,9 +600,8 @@
           await patchStats({ errStreak: 0 });
         }
 
-        // wait before the next prompt (random between min and max)
-        const lo = Math.max(2, Number(cfg.delayMin) || 5);
-        const hi = Math.max(lo, Number(cfg.delayMax) || lo);
+        // wait before the next prompt (random between min and max, per-site aware)
+        const { lo, hi } = delaysFor(cfg);
         const wait = rand(lo, hi);
         const end = Date.now() + wait * 1000;
         while (alive() && Date.now() < end) {
@@ -615,7 +623,7 @@
             if (!(await afterNewChat(cfg, alive))) return;
             continue;
           }
-          await finish("Stopped - prompts could not be sent. Refresh ChatGPT and try again.", "error");
+          await finish("Stopped - prompts could not be sent. Refresh the page and try again.", "error");
           return;
         }
         await setStatus(`Send failed (${r.why}) - retry ${fails}/3...`, "warn");
@@ -628,8 +636,23 @@
     loopId++;
     run(loopId).catch(async e => {
       console.error("[AutoPrompt]", e);
+      log("Error: " + ((e && e.message) || e), "err");
       await finish("Error: " + ((e && e.message) || e), "error");
     });
+  }
+
+  /* ================= selector self-test (popup diagnostics) ================= */
+  function selfCheck() {
+    const r = {};
+    r.site = SITE.id;
+    r.composer = !!getComposer();
+    r.send = !!sendBtnReady();
+    r.user = document.querySelectorAll(SITE.user).length;
+    r.assistant = document.querySelectorAll(SITE.assistant).length;
+    r.newChat = !!findNewChatLink();
+    r.modelSwitcher = !!(SITE.modelSwitcher && modelButton());
+    r.generating = isGenerating();
+    return r;
   }
 
   /* ================= on-page control panel ================= */
@@ -672,7 +695,7 @@
         .hint { color: #6b7280; font-size: 10px; text-align: center; }
       </style>
       <div class="card" id="card">
-        <div class="head" id="drag"><span class="dot" id="dot"></span><span class="title">Auto Prompt</span>
+        <div class="head" id="drag"><span class="dot" id="dot"></span><span class="title">Auto Prompt · ${SITE.name}</span>
           <button class="min" id="min" title="Minimize">–</button></div>
         <div class="body">
           <div class="status" id="status">Starting...</div>
@@ -742,13 +765,13 @@
   async function togglePause() {
     if (!loopActive) return;
     ctl = { ...ctl, paused: !ctl.paused };
-    await store.set({ [KEYS.ctl]: ctl });
+    await store.set({ [myKeys.ctl]: ctl });
     panelRender();
   }
   async function stopRun() {
     if (!loopActive) return;
     // the storage.onChanged handler below cancels the loop and updates the status
-    await store.set({ [KEYS.ctl]: { ...ctl, running: false, paused: false } });
+    await store.set({ [myKeys.ctl]: { ...ctl, running: false, paused: false } });
   }
 
   document.addEventListener("keydown", e => {
@@ -761,44 +784,71 @@
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg && msg.action === "START") {
       (async () => {
-        const token = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
-        try { sessionStorage.setItem(OWNER, token); } catch (_) {}
-        const cur = await store.get(KEYS.ctl, {});
-        await store.set({ [KEYS.ctl]: { ...cur, running: true, paused: false, owner: token } });
+        myId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
+        myId = myId.replace(/-/g, "").slice(0, 8);
+        try {
+          sessionStorage.setItem(OWNER, myId);
+          sessionStorage.setItem(SID, myId);
+        } catch (e) { log("sessionStorage unavailable: " + (e && e.message), "warn"); }
+        myKeys = { st: `${KEYS.st}_${myId}`, log: `${KEYS.log}_${myId}`, ctl: `${KEYS.ctl}_${myId}` };
+        await store.set({ [myKeys.ctl]: { running: true, paused: false, owner: myId, site: SITE.id, ts: Date.now() } });
         startLoop();
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, id: myId });
       })();
       return true;
     }
-    if (msg && msg.action === "PING") { sendResponse({ ok: true }); }
+    if (msg && msg.action === "SELFCHECK") {
+      sendResponse({ ok: true, result: selfCheck() });
+    }
+    if (msg && msg.action === "PING") { sendResponse({ ok: true, site: SITE.id }); }
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !changes[KEYS.ctl]) return;
-    const prev = ctl;
-    ctl = changes[KEYS.ctl].newValue || {};
-    if (ctl.running === false && prev.running !== false && loopActive) {
-      // STOP pressed in popup / panel / hotkey
-      loopId++;
-      loopActive = false;
-      (async () => {
-        await patchStats({ status: "Stopped", phase: "idle", endedAt: Date.now() });
-        log("Stopped by user");
-        clearTimeout(logTimer);
-        await store.set({ [KEYS.log]: logBuf });
-        setTimeout(panelHide, 4000);
-      })();
-    } else {
-      panelRender();
+    if (area !== "local") return;
+    // global stop-all (popup) cancels every loop
+    if (changes[KEYS.ctl] && changes[KEYS.ctl].newValue && changes[KEYS.ctl].newValue.stopAll) {
+      if (loopActive) {
+        loopId++;
+        loopActive = false;
+        (async () => {
+          await patchStats({ status: "Stopped", phase: "idle", endedAt: Date.now() });
+          log("Stopped by user");
+          clearTimeout(logTimer);
+          await store.set({ [myKeys.log]: logBuf });
+          setTimeout(panelHide, 4000);
+        })();
+      }
+      return;
+    }
+    if (myKeys && changes[myKeys.ctl]) {
+      const prev = ctl;
+      ctl = changes[myKeys.ctl].newValue || {};
+      if (ctl.running === false && prev.running !== false && loopActive) {
+        // STOP pressed in popup / panel / hotkey
+        loopId++;
+        loopActive = false;
+        (async () => {
+          await patchStats({ status: "Stopped", phase: "idle", endedAt: Date.now() });
+          log("Stopped by user");
+          clearTimeout(logTimer);
+          await store.set({ [myKeys.log]: logBuf });
+          setTimeout(panelHide, 4000);
+        })();
+      } else {
+        panelRender();
+      }
     }
   });
 
   // Auto-resume after a page reload / hard navigation to a new chat
   (async () => {
     let token = null;
-    try { token = sessionStorage.getItem(OWNER); } catch (_) {}
+    try { token = sessionStorage.getItem(OWNER); } catch (e) { return; }
     if (!token) return;
-    const c = await store.get(KEYS.ctl, {});
+    myId = token;
+    try { sessionStorage.setItem(SID, token); } catch (e) { /* ignore */ }
+    myKeys = { st: `${KEYS.st}_${token}`, log: `${KEYS.log}_${token}`, ctl: `${KEYS.ctl}_${token}` };
+    const c = await store.get(myKeys.ctl, {});
     if (c.running && c.owner === token) startLoop();
   })();
 })();

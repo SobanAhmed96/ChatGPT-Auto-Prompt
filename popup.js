@@ -9,7 +9,7 @@ let logs = [];
 const FIELDS = {
   text: ["mode", "prompts", "suffix"],
   num: ["delayMin", "delayMax", "maxPrompts", "maxMinutes", "newChatEvery", "limitWaitMin"],
-  bool: ["onLimitNewChat", "switchModel", "autoRetry", "showPanel"]
+  bool: ["onLimitNewChat", "switchModel", "autoRetry", "showPanel", "typingHuman", "captureReplies", "schedEnabled"]
 };
 
 const fmtClock = ms => {
@@ -23,8 +23,35 @@ function writeForm() {
   FIELDS.text.forEach(k => { $(k).value = cfg[k] ?? ""; });
   FIELDS.num.forEach(k => { $(k).value = cfg[k] ?? 0; });
   FIELDS.bool.forEach(k => { $(k).checked = !!cfg[k]; });
+  // per-site delay overrides
+  const sd = cfg.siteDelays || {};
+  $("delayChatGPT").value = sd.chatgpt ? sd.chatgpt.delayMin ?? "" : "";
+  $("delayGemini").value = sd.gemini ? sd.gemini.delayMin ?? "" : "";
+  $("delayClaude").value = sd.claude ? sd.claude.delayMin ?? "" : "";
+  // schedule
+  const sc = cfg.schedule || {};
+  $("schedTime").value = sc.time || "09:00";
+  $("schedMax").value = sc.maxPrompts || 0;
+  document.querySelectorAll("#schedDays button").forEach(b =>
+    b.classList.toggle("on", (sc.days || []).includes(+b.dataset.day)));
   renderCats();
   syncMode();
+}
+function readSiteDelays(c) {
+  const sd = {};
+  const map = { chatgpt: "delayChatGPT", gemini: "delayGemini", claude: "delayClaude" };
+  for (const [site, id] of Object.entries(map)) {
+    const v = $(id).value.trim();
+    if (v !== "") sd[site] = { delayMin: Math.max(0, Number(v) || 0), delayMax: Math.max(0, Number(v) || 0) };
+  }
+  c.siteDelays = sd;
+  c.schedule = {
+    ...(cfg.schedule || {}),
+    time: $("schedTime").value || "09:00",
+    maxPrompts: Math.max(0, Number($("schedMax").value) || 0),
+    enabled: $("schedEnabled").checked
+  };
+  return c;
 }
 function readForm() {
   const c = { ...cfg };
@@ -32,7 +59,7 @@ function readForm() {
   FIELDS.num.forEach(k => { c[k] = Math.max(0, Number($(k).value) || 0); });
   FIELDS.bool.forEach(k => { c[k] = $(k).checked; });
   c.categories = [...document.querySelectorAll(".chip.on")].map(b => b.dataset.cat);
-  return c;
+  return readSiteDelays(c);
 }
 let saveTimer = 0;
 function save() {
@@ -67,7 +94,7 @@ function syncMode() {
   const m = $("mode").value;
   $("catBox").hidden = m !== "generate";
   $("textBox").hidden = m === "generate";
-  $("textLbl").textContent = m === "single" ? "Prompt" : "Prompts (one per line)";
+  $("textLbl").textContent = m === "single" ? "Prompt" : m === "chain" ? "Chain (one prompt per line, sent once each)" : "Prompts (one per line)";
   $("prompts").placeholder = m === "single"
     ? "Write the prompt that will be sent again and again…"
     : "Write one prompt per line…\nExplain recursion simply\nGive me 3 healthy dinner ideas";
@@ -186,10 +213,38 @@ async function start() {
 }
 
 async function togglePause() {
-  await chrome.storage.local.set({ [KEYS.ctl]: { ...ctl, paused: !ctl.paused } });
+  const out = {};
+  const all = await chrome.storage.local.get(null);
+  for (const [k, v] of Object.entries(all)) {
+    if (k.startsWith("ap_ctl_") && v && v.running !== false) out[k] = { ...v, paused: !v.paused };
+  }
+  await chrome.storage.local.set(out);
 }
 async function stop() {
-  await chrome.storage.local.set({ [KEYS.ctl]: { ...ctl, running: false, paused: false } });
+  const out = { [KEYS.ctl]: { ...ctl, running: false, paused: false, stopAll: true } };
+  const all = await chrome.storage.local.get(null);
+  for (const [k, v] of Object.entries(all)) {
+    if (k.startsWith("ap_ctl_") && v && v.running !== false) out[k] = { ...v, running: false, paused: false };
+  }
+  await chrome.storage.local.set(out);
+}
+// Aggregate stats from every per-tab run; status line shows the most recent run.
+async function loadRuns() {
+  const all = await chrome.storage.local.get(null);
+  let agg = { sent: 0, chatSent: 0, newChats: 0, startedAt: 0, status: "", phase: "idle", endedAt: 0 };
+  let latest = null;
+  for (const [k, v] of Object.entries(all)) {
+    if (!k.startsWith("ap_stats_") || !v) continue;
+    agg.sent += v.sent || 0;
+    agg.chatSent += v.chatSent || 0;
+    agg.newChats += v.newChats || 0;
+    if ((v.startedAt || 0) > agg.startedAt) latest = v;
+  }
+  if (latest) {
+    agg.status = latest.status; agg.phase = latest.phase;
+    agg.startedAt = latest.startedAt; agg.endedAt = latest.endedAt;
+  }
+  return agg;
 }
 
 /* ---------- init ---------- */
@@ -215,6 +270,67 @@ async function init() {
   $("start").onclick = start;
   $("pause").onclick = togglePause;
   $("stop").onclick = stop;
+  document.querySelectorAll("#schedDays button").forEach(b => b.onclick = () => { b.classList.toggle("on"); save(); });
+
+  // ---- selector diagnostics ----
+  $("diagnostics").onclick = async () => {
+    const tab = await chatTab();
+    if (!tab) { $("diagOut").textContent = "Open a ChatGPT / Gemini / Claude tab first."; return; }
+    try {
+      const res = await chrome.tabs.sendMessage(tab.id, { action: "SELFCHECK" });
+      const r = res && res.result;
+      $("diagOut").textContent = r
+        ? `site=${r.site} · composer=${r.composer ? "ok" : "MISSING"} · send=${r.send ? "ok" : "not ready"} · user msgs=${r.user} · replies=${r.assistant} · new chat=${r.newChat ? "ok" : "MISSING"}`
+        : "No response from the page.";
+    } catch (e) {
+      $("diagOut").textContent = "Could not reach the page — refresh it and try again.";
+    }
+  };
+
+  // ---- settings export / import ----
+  $("exportCfg").onclick = () => {
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "auto-prompt-settings.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  $("importCfg").onclick = () => $("cfgFile").click();
+  $("cfgFile").onchange = async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const data = JSON.parse(await f.text());
+      cfg = { ...DEFAULTS, ...data };
+      await chrome.storage.local.set({ [KEYS.cfg]: cfg });
+      writeForm();
+      notice("Settings imported.");
+    } catch (err) {
+      notice("Import failed: not a valid settings file.");
+    }
+    e.target.value = "";
+  };
+
+  // ---- reply export as Markdown ----
+  $("exportReplies").onclick = async () => {
+    const o = await chrome.storage.local.get(KEYS.replies);
+    const list = o[KEYS.replies] || [];
+    if (!list.length) { notice("No replies captured yet — enable “Capture replies” first."); return; }
+    let md = "# Auto Prompt — captured replies\n\n";
+    list.forEach((e, i) => {
+      md += `## ${i + 1}. ${new Date(e.t).toLocaleString()} (${e.site})\n\n`;
+      md += `**Prompt:** ${e.prompt}\n\n**Reply:**\n\n${e.reply}\n\n---\n\n`;
+    });
+    const blob = new Blob([md], { type: "text/markdown" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "auto-prompt-replies.md";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    notice("");
+  };
+
   $("clearLog").onclick = async () => { logs = []; renderLog(); await chrome.storage.local.set({ [KEYS.log]: [] }); };
   $("copyLog").onclick = async () => {
     const txt = logs.map(e => new Date(e.t).toLocaleTimeString() + "  " + e.m).join("\n");
@@ -227,9 +343,9 @@ async function init() {
 chrome.storage.onChanged.addListener((ch, area) => {
   if (area !== "local") return;
   if (ch[KEYS.ctl]) ctl = ch[KEYS.ctl].newValue || {};
-  if (ch[KEYS.st]) stats = ch[KEYS.st].newValue || {};
-  if (ch[KEYS.log]) { logs = ch[KEYS.log].newValue || []; renderLog(); }
-  if (ch[KEYS.ctl] || ch[KEYS.st]) render();
+  let touched = Object.keys(ch).some(k => k.startsWith("ap_stats_"));
+  if (touched) loadRuns().then(s => { stats = s; render(); });
+  if (ch[KEYS.ctl] || touched) render();
 });
 
 init();
