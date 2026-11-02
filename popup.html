@@ -12,7 +12,7 @@
       <img src="icons/icon48.png" alt="" width="30" height="30">
       <div>
         <h1>Auto Prompt</h1>
-        <p>for ChatGPT &amp; Gemini</p>
+        <p>for ChatGPT &amp; Gemini &amp; Claude</p>
       </div>
     </div>
     <span class="pill" id="pill"><i></i><span id="pillText">Idle</span></span>
@@ -56,6 +56,7 @@
           <option value="generate">Auto-generate (random topics)</option>
           <option value="list">My list — in order, then loop</option>
           <option value="shuffle">My list — random order</option>
+          <option value="chain">Chain — each prompt once, in order</option>
           <option value="single">Single prompt — repeat</option>
         </select>
       </label>
@@ -75,6 +76,7 @@
         <span class="lbl">Add to every prompt <em>optional</em></span>
         <input id="suffix" type="text" placeholder="e.g. Answer in simple English.">
       </label>
+      <p class="hint">Variables: <b>{date}</b> <b>{time}</b> <b>{counter}</b> <b>{random:1-100}</b> <b>{uuid}</b> are replaced in every prompt.</p>
     </section>
 
     <!-- TIMING -->
@@ -117,6 +119,51 @@
         <span class="lbl">If every model is limited, retry after (minutes)</span>
         <input id="limitWaitMin" type="number" min="1" step="1">
       </div>
+
+      <label class="switch"><input id="typingHuman" type="checkbox"><span class="track"></span>
+        <span class="txt"><b>Human-like typing</b><small>Type character-by-character with random jitter (slower, safer)</small></span></label>
+      <label class="switch"><input id="captureReplies" type="checkbox"><span class="track"></span>
+        <span class="txt"><b>Capture replies</b><small>Save every reply so it can be exported as Markdown</small></span></label>
+
+      <div class="field">
+        <span class="lbl">Per-site wait overrides (seconds) <em>optional</em></span>
+        <div class="pair">
+          <label><small>ChatGPT</small><input id="delayChatGPT" type="number" min="0" placeholder="global"></label>
+          <label><small>Gemini</small><input id="delayGemini" type="number" min="0" placeholder="global"></label>
+        </div>
+        <div class="pair">
+          <label><small>Claude</small><input id="delayClaude" type="number" min="0" placeholder="global"></label>
+          <label><small>&nbsp;</small><span></span></label>
+        </div>
+        <p class="hint">Leave empty to use the global min/max above.</p>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Schedule — start automatically</span>
+        <div class="pair">
+          <label><small>Time</small><input id="schedTime" type="time"></label>
+          <label><small>Stop after (prompts)</small><input id="schedMax" type="number" min="0" step="1"></label>
+        </div>
+        <div class="days" id="schedDays">
+          <button type="button" data-day="1">M</button><button type="button" data-day="2">T</button><button type="button" data-day="3">W</button><button type="button" data-day="4">T</button><button type="button" data-day="5">F</button><button type="button" data-day="6">S</button><button type="button" data-day="0">S</button>
+        </div>
+        <label class="switch"><input id="schedEnabled" type="checkbox"><span class="track"></span>
+          <span class="txt"><b>Enable schedule</b><small>Opens ChatGPT and starts automatically at the set time</small></span></label>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Maintenance</span>
+        <div class="pair">
+          <button type="button" id="diagnostics" class="mini">Run selector test</button>
+          <button type="button" id="exportReplies" class="mini">Export replies (MD)</button>
+        </div>
+        <div class="pair">
+          <button type="button" id="exportCfg" class="mini">Export settings</button>
+          <button type="button" id="importCfg" class="mini">Import settings</button>
+        </div>
+        <input type="file" id="cfgFile" accept="application/json" hidden>
+        <p class="hint" id="diagOut"></p>
+      </div>
     </section>
 
     <!-- LOG -->
@@ -129,7 +176,7 @@
     </section>
   </main>
 
-  <footer>Alt+Shift+P pause / resume &nbsp;·&nbsp; Alt+Shift+X stop &nbsp;·&nbsp; v4.1</footer>
+  <footer>Alt+Shift+P pause / resume &nbsp;·&nbsp; Alt+Shift+X stop &nbsp;·&nbsp; v5.0</footer>
 
   <script src="shared.js"></script>
   <script src="popup.js"></script>

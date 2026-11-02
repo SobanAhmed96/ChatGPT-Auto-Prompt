@@ -1,16 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "Auto Prompt for ChatGPT & Gemini",
-  "version": "4.1.0",
-  "description": "Send prompts to ChatGPT and Google Gemini automatically. Opens a new chat when the limit is hit or the chat is full, and keeps going.",
+  "name": "Auto Prompt for ChatGPT, Gemini & Claude",
+  "version": "5.0.0",
+  "description": "Send prompts to ChatGPT, Google Gemini and Claude automatically. Opens a new chat when the limit is hit or the chat is full, captures replies, and keeps going.",
   "permissions": [
     "storage",
-    "scripting"
+    "scripting",
+    "alarms",
+    "downloads"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://claude.ai/*"
   ],
   "icons": {
     "16": "icons/icon16.png",
@@ -30,7 +36,8 @@
       "matches": [
         "https://chatgpt.com/*",
         "https://chat.openai.com/*",
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
       ],
       "js": [
         "shared.js",
